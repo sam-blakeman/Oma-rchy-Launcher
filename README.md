@@ -24,6 +24,7 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 |---|---|---|
 | Type | Opens the list and searches | Searches |
 | Left / Right, L1 / R1 | Flip page | Move / flip page |
+| Swipe down / up | Notifications / app list | |
 | Down | Focus pinned apps | Move |
 | Enter / A | Open the app list | Open the focused app |
 | Esc / B | | Clear search, then back to the clear page |

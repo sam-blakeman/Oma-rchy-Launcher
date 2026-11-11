@@ -16,6 +16,7 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.verticalScroll
@@ -617,6 +618,8 @@ private fun Home(homePresses: Long) {
                                 onLaunch = launch,
                                 onMenu = { overlay = Overlay.AppMenu(it) },
                                 onFocus = { favouritesFocused = it },
+                                onSwipeDown = { activity?.expandNotifications() },
+                                onSwipeUp = { flipPage(1) },
                             )
                         }
                     }
@@ -940,8 +943,35 @@ private fun ClearPage(
     onLaunch: (AppEntry) -> Unit,
     onMenu: (AppEntry) -> Unit,
     onFocus: (Boolean) -> Unit,
+    onSwipeDown: () -> Unit,
+    onSwipeUp: () -> Unit,
 ) {
-    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.BottomCenter) {
+    val threshold = with(LocalDensity.current) { 80.dp.toPx() }
+    val enabled = LocalInteractive.current
+    Box(
+        Modifier
+            .fillMaxSize()
+            // Swipe down for notifications, up for the app list. Sideways swipes stay with the pager.
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                var travel = 0f
+                detectVerticalDragGestures(
+                    onDragStart = { travel = 0f },
+                    onVerticalDrag = { change, amount ->
+                        travel += amount
+                        change.consume()
+                    },
+                    onDragEnd = {
+                        when {
+                            travel > threshold -> onSwipeDown()
+                            travel < -threshold -> onSwipeUp()
+                        }
+                    },
+                )
+            }
+            .padding(24.dp),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
         Row(
             Modifier
                 .onFocusChanged { onFocus(it.hasFocus) }
