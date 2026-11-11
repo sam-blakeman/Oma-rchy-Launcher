@@ -123,4 +123,5 @@ val AI_APPS = listOf(
     AiApp("ChatGPT", "com.openai.chatgpt"),
     AiApp("Gemini", "com.google.android.apps.bard"),
     AiApp("Grok", "ai.x.grok"),
+    AiApp("Grok Bot", "ai.x.grok.bot"),
 )

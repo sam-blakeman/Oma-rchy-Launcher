@@ -11,7 +11,7 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 - **Search-first app list.** Type anywhere to filter; Enter opens the top match.
   Search also does sums (`12*7`, Enter copies the answer), jumps to settings pages
   (`wifi`, `bluetooth`, `display`...) and falls back to a web search.
-- **Ask your AI app.** Any search can be sent to Claude, ChatGPT, Gemini or Grok (whichever
+- **Ask your AI app.** Any search can be sent to Claude, ChatGPT, Gemini, Grok or Grok Bot (whichever
   is installed and chosen in the menu); start with `?` to ask straight away. Long-press the
   wallpaper to open the AI app.
 - **Omarchy themes.** Uses each theme's `colors.toml` and backgrounds, and can install
