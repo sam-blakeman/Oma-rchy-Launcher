@@ -169,9 +169,18 @@ class ThemeStore(private val context: Context) {
         }.getOrNull()
     }
 
+    /** One lock per wallpaper file, so two callers never download the same file at once. */
+    private val downloads = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
     /** Makes sure a wallpaper is readable on the device, downloading it first if needed. */
     private fun local(wallpaper: Wallpaper): Wallpaper? {
         if (wallpaper !is Wallpaper.Remote) return wallpaper
+        synchronized(downloads.getOrPut(wallpaper.cache.path) { Any() }) {
+            return download(wallpaper)
+        }
+    }
+
+    private fun download(wallpaper: Wallpaper.Remote): Wallpaper? {
         if (!wallpaper.cache.isFile) {
             val partial = File(wallpaper.cache.path + ".part")
             val connection = URL(wallpaper.url).openConnection() as HttpURLConnection
@@ -210,23 +219,37 @@ class ThemeStore(private val context: Context) {
         }.getOrNull()
     }
 
+    /** Which theme and background Android's own wallpaper was last set to, as "themeId#index". */
+    var systemWallpaper: String?
+        get() = prefs.getString("system-wallpaper", null)
+        private set(value) = prefs.edit().putString("system-wallpaper", value).apply()
+
+    fun systemWallpaperKey(theme: Theme, index: Int) = "${theme.id}#${index.mod(theme.backgrounds.size.coerceAtLeast(1))}"
+
     /**
-     * Sets Android's home and lock screen wallpaper to a theme's background, or to the
-     * theme's plain background colour when it has no images. Returns whether it worked.
+     * Sets Android's home and lock screen wallpaper to exactly what the launcher shows: the
+     * background cropped to fill a [width] x [height] screen over the theme's background
+     * colour, or just the colour when the theme has no images. Returns whether it worked.
      */
-    suspend fun setSystemWallpaper(theme: Theme, index: Int): Boolean = withContext(Dispatchers.IO) {
-        val manager = WallpaperManager.getInstance(context)
-        val both = WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+    suspend fun setSystemWallpaper(theme: Theme, index: Int, width: Int, height: Int): Boolean = withContext(Dispatchers.IO) {
+        val wallpaper = theme.backgrounds.getOrNull(index.mod(theme.backgrounds.size.coerceAtLeast(1)))
+        val image = wallpaper?.let { loadWallpaper(it, width, height) ?: return@withContext false }
         runCatching {
-            val wallpaper = theme.backgrounds.getOrNull(index.mod(theme.backgrounds.size.coerceAtLeast(1)))
-            when (val ready = wallpaper?.let(::local)) {
-                null -> if (wallpaper != null) error("wallpaper unavailable") else {
-                    val plain = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-                    plain.eraseColor(theme.bg.toArgb())
-                    manager.setBitmap(plain, null, true, both)
-                }
-                else -> open(ready).use { manager.setStream(it, null, true, both) }
+            val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(out)
+            canvas.drawColor(theme.bg.toArgb())
+            if (image != null) {
+                // Centre-crop, matching ContentScale.Crop on the home screen.
+                val scale = maxOf(width.toFloat() / image.width, height.toFloat() / image.height)
+                val w = image.width * scale
+                val h = image.height * scale
+                val left = (width - w) / 2
+                val top = (height - h) / 2
+                canvas.drawBitmap(image, null, android.graphics.RectF(left, top, left + w, top + h), android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
             }
+            WallpaperManager.getInstance(context)
+                .setBitmap(out, null, true, WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK)
+            systemWallpaper = systemWallpaperKey(theme, index)
         }.isSuccess
     }
 

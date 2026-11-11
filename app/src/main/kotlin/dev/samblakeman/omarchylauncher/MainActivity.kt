@@ -387,18 +387,11 @@ private fun Home(homePresses: Long) {
         field = TextFieldValue(text, TextRange(text.length))
     }
 
-    // Android's own wallpaper follows the launcher's, so the lock screen and recents match.
-    fun syncSystemWallpaper(target: Theme, index: Int) {
-        // A stock theme without its wallpaper list yet is synced once the list arrives, below.
-        if (!target.user && target.backgrounds.isEmpty()) return
-        scope.launch { store.setSystemWallpaper(target, index) }
-    }
 
     fun nextBackground() {
         if (theme.backgrounds.isEmpty()) return
         backgroundIndex = (backgroundIndex + 1).mod(theme.backgrounds.size)
         store.setBackgroundIndex(theme, backgroundIndex)
-        syncSystemWallpaper(theme, backgroundIndex)
     }
 
     fun togglePin(app: AppEntry) {
@@ -430,7 +423,26 @@ private fun Home(homePresses: Long) {
         if (themes.isEmpty()) return@LaunchedEffect
         store.fetchStockWallpapers(theme)?.let { updated ->
             themes = themes.map { if (it.id == updated.id) updated else it }
-            syncSystemWallpaper(updated, store.backgroundIndex(updated))
+        }
+    }
+    // Android's own wallpaper follows the launcher's, so the lock screen and recents match.
+    // Checked on start and on every change, so a missed or failed update is put right later.
+    val screen = LocalConfiguration.current.let { config ->
+        val density = LocalDensity.current.density
+        (config.screenWidthDp * density).toInt() to (config.screenHeightDp * density).toInt()
+    }
+    LaunchedEffect(theme.id, backgroundIndex, theme.backgrounds.size, themes.isEmpty(), screen) {
+        if (themes.isEmpty()) return@LaunchedEffect
+        // A stock theme whose wallpaper list hasn't arrived yet is handled when it does.
+        if (!theme.user && theme.backgrounds.isEmpty()) return@LaunchedEffect
+        val key = store.systemWallpaperKey(theme, backgroundIndex)
+        if (key == store.systemWallpaper) return@LaunchedEffect
+        delay(500) // Let quick runs of changes settle before rendering.
+        // A download can fail on a patchy connection, so try a few times before waiting
+        // for the next start or change.
+        for (attempt in 1..3) {
+            if (store.setSystemWallpaper(theme, backgroundIndex, screen.first, screen.second)) break
+            delay(5_000L * attempt)
         }
     }
     LaunchedEffect(homePresses) {
@@ -647,13 +659,11 @@ private fun Home(homePresses: Long) {
                         themeId = it.id
                         store.currentId = it.id
                         pickerOpen = false
-                        syncSystemWallpaper(it, store.backgroundIndex(it))
                     },
                     onInstalled = { id ->
                         themes = store.loadAll()
                         themeId = id
                         store.currentId = id
-                        themes.firstOrNull { it.id == id }?.let { syncSystemWallpaper(it, store.backgroundIndex(it)) }
                     },
                     onDismiss = { pickerOpen = false },
                 )

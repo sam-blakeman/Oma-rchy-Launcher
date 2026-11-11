@@ -12,8 +12,8 @@ android {
         applicationId = "dev.samblakeman.omarchylauncher"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.3.1"
     }
 
     // The release key is read from ~/.gradle/gradle.properties (OMA_STORE_FILE and friends),
