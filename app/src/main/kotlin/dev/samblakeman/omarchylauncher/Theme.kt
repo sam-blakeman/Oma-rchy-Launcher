@@ -1,4 +1,4 @@
-package app.omalauncher
+package dev.samblakeman.omarchylauncher
 
 import android.app.WallpaperManager
 import android.content.Context

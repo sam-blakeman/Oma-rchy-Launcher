@@ -1,4 +1,4 @@
-package app.omalauncher
+package dev.samblakeman.omarchylauncher
 
 import android.content.BroadcastReceiver
 import android.content.Context

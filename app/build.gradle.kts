@@ -5,15 +5,15 @@ plugins {
 }
 
 android {
-    namespace = "app.omalauncher"
+    namespace = "dev.samblakeman.omarchylauncher"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "app.omalauncher"
+        applicationId = "dev.samblakeman.omarchylauncher"
         minSdk = 33
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     // The release key is read from ~/.gradle/gradle.properties (OMA_STORE_FILE and friends),

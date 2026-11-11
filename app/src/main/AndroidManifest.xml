@@ -14,7 +14,7 @@
     </queries>
 
     <application
-        android:label="Oma Launcher"
+        android:label="Oma-rchy Launcher"
         android:theme="@style/Theme.Oma">
         <activity
             android:name=".MainActivity"
