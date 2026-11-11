@@ -12,8 +12,29 @@ android {
         applicationId = "app.omalauncher"
         minSdk = 33
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2.0"
+    }
+
+    // The release key is read from ~/.gradle/gradle.properties (OMA_STORE_FILE and friends),
+    // never from the repo. Debug builds use it too when present, so a debug build can update
+    // a release install in place. Without it, debug builds fall back to the usual debug key.
+    val releaseKey = providers.gradleProperty("OMA_STORE_FILE").orNull
+    signingConfigs {
+        if (releaseKey != null) create("release") {
+            storeFile = file(releaseKey)
+            storePassword = providers.gradleProperty("OMA_STORE_PASSWORD").get()
+            keyAlias = providers.gradleProperty("OMA_KEY_ALIAS").get()
+            keyPassword = providers.gradleProperty("OMA_KEY_PASSWORD").get()
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.findByName("release")
+        }
+        getByName("debug") {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
     }
 
     buildFeatures { compose = true }

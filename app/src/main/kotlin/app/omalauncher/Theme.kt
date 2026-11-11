@@ -16,10 +16,14 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.ZipInputStream
 
-/** One wallpaper belonging to a theme: bundled in the APK or a file the user added. */
+/**
+ * One wallpaper belonging to a theme: bundled in the APK, a file on the device, or one of
+ * Omarchy's own wallpapers that is downloaded into [Remote.cache] the first time it's shown.
+ */
 sealed interface Wallpaper {
     data class Asset(val path: String) : Wallpaper
     data class OnDisk(val file: File) : Wallpaper
+    data class Remote(val url: String, val cache: File) : Wallpaper
 }
 
 /** An Omarchy theme reduced to the handful of colours the launcher draws with. */
@@ -104,9 +108,9 @@ class ThemeStore(private val context: Context) {
             val toml = runCatching {
                 assets.open("themes/$name/colors.toml").use { it.readBytes().decodeToString() }
             }.getOrNull() ?: return@mapNotNull null
-            val backgrounds = assets.list("themes/$name/backgrounds").orEmpty().sorted()
+            val bundled = assets.list("themes/$name/backgrounds").orEmpty().sorted()
                 .map { Wallpaper.Asset("themes/$name/backgrounds/$it") }
-            Theme.parse("stock:$name", name, false, toml, backgrounds)
+            Theme.parse("stock:$name", name, false, toml, bundled.ifEmpty { remoteWallpapers(name) })
         }
         val user = userDir.listFiles().orEmpty()
             .filter { it.isDirectory && !it.name.startsWith(".") }
@@ -121,12 +125,82 @@ class ThemeStore(private val context: Context) {
         (stock + user).sortedBy { it.name }
     }
 
+    /** Downloaded Omarchy wallpapers, one folder per theme, each with a list.txt of what exists. */
+    private val remoteDir = File(context.filesDir, "wallpapers")
+
+    private fun remoteWallpapers(name: String): List<Wallpaper> {
+        val dir = File(remoteDir, name)
+        val list = File(dir, "list.txt").takeIf { it.isFile } ?: return emptyList()
+        return list.readLines().mapNotNull { line ->
+            val (file, url) = line.split('\t').takeIf { it.size == 2 } ?: return@mapNotNull null
+            Wallpaper.Remote(url, File(dir, file))
+        }
+    }
+
+    /**
+     * For a stock theme with no wallpapers yet, fetches the list of its wallpapers from
+     * Omarchy's GitHub repo and returns the theme with them filled in, or null if that
+     * isn't possible right now (offline, not a stock theme, or not in the repo).
+     */
+    suspend fun fetchStockWallpapers(theme: Theme): Theme? = withContext(Dispatchers.IO) {
+        if (theme.user || theme.backgrounds.isNotEmpty()) return@withContext null
+        runCatching {
+            val connection = URL("$OMARCHY_API/themes/${theme.name}/backgrounds").openConnection() as HttpURLConnection
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 30_000
+            connection.setRequestProperty("Accept", "application/vnd.github+json")
+            connection.setRequestProperty("User-Agent", "Oma-rchy-Launcher")
+            try {
+                if (connection.responseCode != 200) return@runCatching null
+                val entries = org.json.JSONArray(connection.inputStream.bufferedReader().readText())
+                val lines = (0 until entries.length()).map { entries.getJSONObject(it) }
+                    .filter { it.optString("type") == "file" }
+                    .map { it.getString("name") to it.getString("download_url") }
+                    .filter { (name, _) -> name.substringAfterLast('.').lowercase() in IMAGE_EXTENSIONS }
+                    .sortedBy { it.first }
+                    .map { (name, url) -> "$name\t$url" }
+                if (lines.isEmpty()) return@runCatching null
+                val dir = File(remoteDir, theme.name).apply { mkdirs() }
+                File(dir, "list.txt").writeText(lines.joinToString("\n"))
+                theme.copy(backgrounds = remoteWallpapers(theme.name))
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    /** Makes sure a wallpaper is readable on the device, downloading it first if needed. */
+    private fun local(wallpaper: Wallpaper): Wallpaper? {
+        if (wallpaper !is Wallpaper.Remote) return wallpaper
+        if (!wallpaper.cache.isFile) {
+            val partial = File(wallpaper.cache.path + ".part")
+            val connection = URL(wallpaper.url).openConnection() as HttpURLConnection
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 60_000
+            try {
+                if (connection.responseCode != 200) return null
+                connection.inputStream.use { input -> partial.outputStream().use { input.copyTo(it) } }
+                if (!partial.renameTo(wallpaper.cache)) return null
+            } catch (e: java.io.IOException) {
+                return null
+            } finally {
+                partial.delete()
+                connection.disconnect()
+            }
+        }
+        return Wallpaper.OnDisk(wallpaper.cache)
+    }
+
+    private fun open(wallpaper: Wallpaper): InputStream = when (wallpaper) {
+        is Wallpaper.Asset -> context.assets.open(wallpaper.path)
+        is Wallpaper.OnDisk -> wallpaper.file.inputStream()
+        is Wallpaper.Remote -> error("download it first")
+    }
+
     /** Decodes a wallpaper, downsampled so huge originals don't exhaust memory. */
     suspend fun loadWallpaper(wallpaper: Wallpaper, width: Int, height: Int): Bitmap? = withContext(Dispatchers.IO) {
-        fun open(): InputStream = when (wallpaper) {
-            is Wallpaper.Asset -> context.assets.open(wallpaper.path)
-            is Wallpaper.OnDisk -> wallpaper.file.inputStream()
-        }
+        val ready = local(wallpaper) ?: return@withContext null
+        fun open(): InputStream = open(ready)
         runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             open().use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -144,14 +218,14 @@ class ThemeStore(private val context: Context) {
         val manager = WallpaperManager.getInstance(context)
         val both = WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
         runCatching {
-            when (val wallpaper = theme.backgrounds.getOrNull(index.mod(theme.backgrounds.size.coerceAtLeast(1)))) {
-                is Wallpaper.Asset -> context.assets.open(wallpaper.path).use { manager.setStream(it, null, true, both) }
-                is Wallpaper.OnDisk -> wallpaper.file.inputStream().use { manager.setStream(it, null, true, both) }
-                null -> {
+            val wallpaper = theme.backgrounds.getOrNull(index.mod(theme.backgrounds.size.coerceAtLeast(1)))
+            when (val ready = wallpaper?.let(::local)) {
+                null -> if (wallpaper != null) error("wallpaper unavailable") else {
                     val plain = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
                     plain.eraseColor(theme.bg.toArgb())
                     manager.setBitmap(plain, null, true, both)
                 }
+                else -> open(ready).use { manager.setStream(it, null, true, both) }
             }
         }.isSuccess
     }
@@ -204,6 +278,7 @@ class ThemeStore(private val context: Context) {
 
     private companion object {
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
+        const val OMARCHY_API = "https://api.github.com/repos/omacom/omarchy/contents"
         val GITHUB_REPO = Regex("""github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?/?$""")
     }
 }

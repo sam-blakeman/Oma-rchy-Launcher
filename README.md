@@ -33,14 +33,22 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 | Ctrl+T / Y | Theme picker | Theme picker |
 | Ctrl+B / R3 | Next wallpaper | Next wallpaper |
 
+## Installing
+
+Download the APK from the [latest release](https://github.com/sam-blakeman/Oma-rchy-Launcher/releases/latest),
+install it, then pick Oma-rchy Launcher as your home app in Android's settings. Some ROMs ask
+whether it may read your installed apps: it needs that to list them.
+
+Theme wallpapers are downloaded from [Omarchy's repo](https://github.com/omacom/omarchy) the first
+time you use each theme, so the APK stays small.
+
 ## Building
 
-The stock themes aren't stored in this repo. They're copied from a local Omarchy install
-at build time, with wallpapers resized for a 2560×1600 screen:
+The stock theme colours are copied from a local Omarchy install:
 
 ```sh
-./scripts/sync-themes.sh            # reads /usr/share/omarchy/themes
-./scripts/sync-themes.sh <dir>      # or any folder of Omarchy themes
+./scripts/sync-themes.sh                    # reads /usr/share/omarchy/themes
+./scripts/sync-themes.sh --with-wallpapers  # also bundle the wallpapers, for offline use
 ```
 
 Then build with JDK 17 and the Android SDK (platform 35):
@@ -50,10 +58,12 @@ Then build with JDK 17 and the Android SDK (platform 35):
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Without the sync step the app still builds and runs, with only themes installed from GitHub.
+Release builds are signed with a key read from `~/.gradle/gradle.properties`
+(`OMA_STORE_FILE`, `OMA_STORE_PASSWORD`, `OMA_KEY_ALIAS`, `OMA_KEY_PASSWORD`); without it,
+builds use the standard debug key.
 
 ## Credits
 
-Themes and wallpapers belong to [Omarchy](https://github.com/basecamp/omarchy) and their
+Themes and wallpapers come from [Omarchy](https://github.com/omacom/omarchy) (MIT) and their
 respective authors. Bundles the [JetBrains Mono Nerd Font](https://www.nerdfonts.com/)
 (SIL Open Font License).

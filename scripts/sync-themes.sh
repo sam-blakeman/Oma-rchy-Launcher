@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-# Copies the stock Omarchy themes into the app's assets.
-# Each theme keeps its colors.toml; wallpapers are resized to cover the
-# tablet's 2560x1600 screen and re-encoded as WebP to keep the APK small.
+# Copies the stock Omarchy themes' colours into the app's assets. The launcher downloads
+# each theme's wallpapers from Omarchy's GitHub repo the first time the theme is used.
+#
+#   scripts/sync-themes.sh [--with-wallpapers] [themes-dir]
+#
+# --with-wallpapers also bundles the wallpapers, resized to cover a 2560x1600 screen and
+# re-encoded as WebP, for a build that works offline (about 25 MB larger).
 set -euo pipefail
 
+WALLPAPERS=0
+if [ "${1:-}" = "--with-wallpapers" ]; then
+  WALLPAPERS=1
+  shift
+fi
 SRC="${1:-/usr/share/omarchy/themes}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/app/src/main/assets/themes"
 
@@ -13,8 +22,10 @@ mkdir -p "$DEST"
 for dir in "$SRC"/*/; do
   name="$(basename "$dir")"
   [ -f "$dir/colors.toml" ] || continue
-  mkdir -p "$DEST/$name/backgrounds"
+  mkdir -p "$DEST/$name"
   cp "$dir/colors.toml" "$DEST/$name/colors.toml"
+  [ "$WALLPAPERS" = 1 ] || continue
+  mkdir -p "$DEST/$name/backgrounds"
   find "$dir/backgrounds" -maxdepth 1 -type f \
     \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) -print0 |
     sort -z |

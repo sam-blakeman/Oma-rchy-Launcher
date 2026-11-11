@@ -389,6 +389,8 @@ private fun Home(homePresses: Long) {
 
     // Android's own wallpaper follows the launcher's, so the lock screen and recents match.
     fun syncSystemWallpaper(target: Theme, index: Int) {
+        // A stock theme without its wallpaper list yet is synced once the list arrives, below.
+        if (!target.user && target.backgrounds.isEmpty()) return
         scope.launch { store.setSystemWallpaper(target, index) }
     }
 
@@ -423,6 +425,14 @@ private fun Home(homePresses: Long) {
     }
 
     LaunchedEffect(Unit) { themes = store.loadAll() }
+    // Stock themes' wallpapers come from Omarchy's GitHub repo, listed the first time a theme is used.
+    LaunchedEffect(theme.id, themes.isEmpty()) {
+        if (themes.isEmpty()) return@LaunchedEffect
+        store.fetchStockWallpapers(theme)?.let { updated ->
+            themes = themes.map { if (it.id == updated.id) updated else it }
+            syncSystemWallpaper(updated, store.backgroundIndex(updated))
+        }
+    }
     LaunchedEffect(homePresses) {
         dismissKeyboard()
         setQuery("")
