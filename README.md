@@ -12,6 +12,10 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 - **Omarchy themes.** Uses each theme's `colors.toml` and backgrounds, and can install
   more themes from a GitHub URL, like `omarchy theme install`.
 - **Matching system wallpaper** on the home and lock screens.
+- **Omarchy-style menu** from the logo in the bar: apps, search, theme, wallpaper,
+  notifications, Wi-Fi and settings in one place.
+- **Per-app menu** on long press: pin to home, rename, hide or open app info.
+- **Recent apps first** in the list when you're not searching.
 - **Touch, keyboard and controller** all work.
 
 | Input | Clear page | App list |
@@ -21,7 +25,8 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 | Down | Focus pinned apps | Move |
 | Enter / A | Open the app list | Open the focused app |
 | Esc / B | | Clear search, then back to the clear page |
-| Long press, Ctrl+P, Start | Unpin | Pin or unpin |
+| Long press, Ctrl+P, Start | App menu | App menu |
+| Ctrl+M / Select | Main menu | Main menu |
 | Ctrl+T / Y | Theme picker | Theme picker |
 | Ctrl+B / R3 | Next wallpaper | Next wallpaper |
 

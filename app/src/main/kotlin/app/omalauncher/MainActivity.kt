@@ -16,6 +16,9 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -143,7 +146,9 @@ private const val PAGE_COUNT = 200
 /** How many recently opened apps lead the app list. */
 private const val RECENT_COUNT = 8
 
-data class AppEntry(val key: String, val label: String, val launch: () -> Unit)
+data class AppEntry(val key: String, val label: String, val launch: () -> Unit) {
+    val packageName: String get() = key.substringBefore('/')
+}
 
 sealed interface Command {
     data class Type(val char: Char) : Command
@@ -154,6 +159,15 @@ sealed interface Command {
     data object PreviousPage : Command
     data object NextPage : Command
     data object Favourites : Command
+    data object Menu : Command
+}
+
+/** Which panel, if any, is open over the home screen. */
+private sealed interface Overlay {
+    data object Menu : Overlay
+    data class AppMenu(val app: AppEntry) : Overlay
+    data class Rename(val app: AppEntry) : Overlay
+    data object Hidden : Overlay
 }
 
 class MainActivity : ComponentActivity() {
@@ -211,6 +225,8 @@ class MainActivity : ComponentActivity() {
         val modified = event.isCtrlPressed || event.isAltPressed || event.isMetaPressed
         val char = event.unicodeChar
         val command = when {
+            keyCode == KeyEvent.KEYCODE_BUTTON_SELECT -> Command.Menu
+            event.isCtrlPressed && keyCode == KeyEvent.KEYCODE_M -> Command.Menu
             keyCode == KeyEvent.KEYCODE_BUTTON_X -> Command.Search
             keyCode == KeyEvent.KEYCODE_BUTTON_Y -> Command.Themes
             keyCode == KeyEvent.KEYCODE_BUTTON_L1 -> Command.PreviousPage
@@ -254,6 +270,15 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         val OPEN_KEYS = setOf(KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_BUTTON_A)
+    }
+
+    fun openAppInfo(packageName: String) {
+        runCatching {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", packageName, null))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
     }
 
     fun open(action: String) {
@@ -307,6 +332,9 @@ private fun Home(homePresses: Long) {
     var field by remember { mutableStateOf(TextFieldValue()) }
     val query = field.text
     var pickerOpen by remember { mutableStateOf(false) }
+    var overlay by remember { mutableStateOf<Overlay?>(null) }
+    // True while any panel is over the home screen; the pages underneath then ignore input.
+    val blocked = pickerOpen || overlay != null
     val searchFocus = remember { FocusRequester() }
     val gridFocus = remember { FocusRequester() }
     val favouriteFocus = remember { FocusRequester() }
@@ -314,6 +342,9 @@ private fun Home(homePresses: Long) {
     var favourites by remember { mutableStateOf(favouriteStore.load()) }
     var favouritesFocused by remember { mutableStateOf(false) }
     val recentStore = remember { Recents(context.applicationContext) }
+    val appPrefs = remember { AppPrefs(context.applicationContext) }
+    var hidden by remember { mutableStateOf(appPrefs.hidden()) }
+    var names by remember { mutableStateOf(appPrefs.names()) }
     var recents by remember { mutableStateOf(recentStore.load()) }
     val haptics = LocalHapticFeedback.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -351,13 +382,30 @@ private fun Home(homePresses: Long) {
         favouriteStore.save(favourites)
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
     }
-    val pinned = remember(apps, favourites) { favourites.mapNotNull { key -> apps.firstOrNull { it.key == key } } }
+    // What the launcher shows: renamed where the user chose a name, hidden apps left out.
+    val visible = remember(apps, hidden, names) {
+        apps.filter { it.key !in hidden }
+            .map { app -> names[app.key]?.let { app.copy(label = it) } ?: app }
+            .sortedBy { it.label.lowercase() }
+    }
+    val pinned = remember(visible, favourites) { favourites.mapNotNull { key -> visible.firstOrNull { it.key == key } } }
+
+    fun setHidden(app: AppEntry, hide: Boolean) {
+        hidden = if (hide) hidden + app.key else hidden - app.key
+        appPrefs.setHidden(hidden)
+    }
+
+    fun rename(app: AppEntry, name: String) {
+        appPrefs.setName(app.key, name)
+        names = appPrefs.names()
+    }
 
     LaunchedEffect(Unit) { themes = store.loadAll() }
     LaunchedEffect(homePresses) {
         dismissKeyboard()
         setQuery("")
         pickerOpen = false
+        overlay = null
         apps = loadApps(context)
         // Home always lands on the clear wallpaper page.
         if (pager.currentPage % 2 != 0) {
@@ -381,8 +429,8 @@ private fun Home(homePresses: Long) {
         }
     }
     SideEffect {
-        activity?.clearPage = !onApps && !pickerOpen
-        activity?.arrowsFlipPages = !onApps && !pickerOpen && !favouritesFocused
+        activity?.clearPage = !onApps && !blocked
+        activity?.arrowsFlipPages = !onApps && !blocked && !favouritesFocused
     }
 
     fun flipPage(delta: Int) {
@@ -396,7 +444,8 @@ private fun Home(homePresses: Long) {
     }
     LaunchedEffect(theme.light) { activity?.styleSystemBars(theme.light) }
     BackHandler {
-        if (pickerOpen) pickerOpen = false
+        if (overlay != null) overlay = null
+        else if (pickerOpen) pickerOpen = false
         else {
             dismissKeyboard()
             // Back first clears a search, then returns to the clear page.
@@ -407,12 +456,19 @@ private fun Home(homePresses: Long) {
     // Typing anywhere searches. On a controller: X search, Y themes, L1/R1 pages, R3 wallpaper.
     val latestCommand by androidx.compose.runtime.rememberUpdatedState<(Command) -> Unit> { command ->
         when (command) {
-            Command.Themes -> pickerOpen = !pickerOpen
+            Command.Menu -> {
+                pickerOpen = false
+                overlay = if (overlay == Overlay.Menu) null else Overlay.Menu
+            }
+            Command.Themes -> {
+                overlay = null
+                pickerOpen = !pickerOpen
+            }
             Command.NextBackground -> nextBackground()
             Command.Favourites -> runCatching { favouriteFocus.requestFocus() }
-            Command.PreviousPage -> if (!pickerOpen) flipPage(-1)
-            Command.NextPage -> if (!pickerOpen) flipPage(1)
-            else -> if (!pickerOpen) {
+            Command.PreviousPage -> if (!blocked) flipPage(-1)
+            Command.NextPage -> if (!blocked) flipPage(1)
+            else -> if (!blocked) {
                 when (command) {
                     // Read the live text, not this composition's copy: fast typing can
                     // deliver several keys before the screen redraws.
@@ -431,14 +487,14 @@ private fun Home(homePresses: Long) {
     }
     LaunchedEffect(activity) { activity?.commands?.collect { latestCommand(it) } }
 
-    val shown = remember(apps, query, recents) {
+    val shown = remember(visible, query, recents) {
         val needle = query.trim()
         if (needle.isEmpty()) {
             // The last few apps opened come first, newest first; the rest stay alphabetical.
-            val recent = apps.filter { it.key in recents }.sortedByDescending { recents[it.key] }.take(RECENT_COUNT)
-            recent + (apps - recent.toSet())
+            val recent = visible.filter { it.key in recents }.sortedByDescending { recents[it.key] }.take(RECENT_COUNT)
+            recent + (visible - recent.toSet())
         }
-        else apps.mapNotNull { app ->
+        else visible.mapNotNull { app ->
             // Names starting with the query first, then word starts, then anywhere.
             val rank = when {
                 app.label.startsWith(needle, ignoreCase = true) -> 0
@@ -460,19 +516,20 @@ private fun Home(homePresses: Long) {
         ) {
             WallpaperLayer(store, theme, backgroundIndex)
 
-            CompositionLocalProvider(LocalInteractive provides !pickerOpen) {
+            CompositionLocalProvider(LocalInteractive provides !blocked) {
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
                 CompositionLocalProvider(LocalBarFocusable provides onApps) {
                     Bar(
                         backgroundLabel = if (theme.backgrounds.isEmpty()) null
                         else "bg ${backgroundIndex.mod(theme.backgrounds.size) + 1}/${theme.backgrounds.size}",
+                        onMenu = { overlay = Overlay.Menu },
                         onTheme = { pickerOpen = true },
                         onNextBackground = ::nextBackground,
                     )
                 }
                 HorizontalPager(
                     state = pager,
-                    userScrollEnabled = !pickerOpen,
+                    userScrollEnabled = !blocked,
                     modifier = Modifier.fillMaxSize(),
                 ) { page ->
                     Box(
@@ -494,7 +551,7 @@ private fun Home(homePresses: Long) {
                     // Only the page in view takes input. Otherwise focus can land on an app
                     // in the page sliding away, and the pager scrolls back to show it.
                     CompositionLocalProvider(
-                        LocalInteractive provides (!pickerOpen && page == pager.currentPage),
+                        LocalInteractive provides (!blocked && page == pager.currentPage),
                     ) {
                         val launch: (AppEntry) -> Unit = { app ->
                             app.launch()
@@ -506,21 +563,21 @@ private fun Home(homePresses: Long) {
                         if (page % 2 != 0) {
                             AppsPage(
                                 apps = shown,
-                                total = apps.size,
+                                total = visible.size,
                                 pinnedKeys = favourites,
                                 field = field,
                                 searchFocus = searchFocus,
                                 gridFocus = gridFocus,
                                 onQuery = { field = it },
                                 onLaunch = launch,
-                                onPin = ::togglePin,
+                                onMenu = { overlay = Overlay.AppMenu(it) },
                             )
                         } else {
                             ClearPage(
                                 favourites = pinned,
                                 firstFocus = favouriteFocus,
                                 onLaunch = launch,
-                                onUnpin = ::togglePin,
+                                onMenu = { overlay = Overlay.AppMenu(it) },
                                 onFocus = { favouritesFocused = it },
                             )
                         }
@@ -550,6 +607,94 @@ private fun Home(homePresses: Long) {
                     onDismiss = { pickerOpen = false },
                 )
             }
+
+            when (val open = overlay) {
+                null -> Unit
+                Overlay.Menu -> MenuPanel(
+                    title = "menu",
+                    onDismiss = { overlay = null },
+                    items = listOf(
+                        MenuItem("\uf00a", "Apps", "L1 / R1") {
+                            overlay = null
+                            if (!onApps) flipPage(1)
+                        },
+                        MenuItem("\uf002", "Search", "type / X") {
+                            overlay = null
+                            latestCommand(Command.Search)
+                        },
+                        MenuItem("\uf1fc", "Theme", "ctrl+t / Y") {
+                            overlay = null
+                            pickerOpen = true
+                        },
+                        MenuItem("\uf03e", "Next wallpaper", "ctrl+b / R3") { nextBackground() },
+                        MenuItem("\uf0f3", "Notifications") {
+                            overlay = null
+                            activity?.expandNotifications()
+                        },
+                        MenuItem("\uf1eb", "Wi-Fi") {
+                            overlay = null
+                            activity?.open(Settings.ACTION_WIFI_SETTINGS)
+                        },
+                        MenuItem("\uf070", "Hidden apps", if (hidden.isEmpty()) null else "${hidden.size}") {
+                            overlay = Overlay.Hidden
+                        },
+                        MenuItem("\uf013", "Android settings") {
+                            overlay = null
+                            activity?.open(Settings.ACTION_SETTINGS)
+                        },
+                    ),
+                )
+                is Overlay.AppMenu -> {
+                    val app = open.app
+                    val isPinned = app.key in favourites
+                    MenuPanel(
+                        title = app.label,
+                        onDismiss = { overlay = null },
+                        items = listOf(
+                            MenuItem("\uf04b", "Open") {
+                                overlay = null
+                                recentStore.record(app.key)
+                                recents = recentStore.load()
+                                app.launch()
+                            },
+                            MenuItem("\uf08d", if (isPinned) "Unpin" else "Pin to home", "ctrl+p") {
+                                togglePin(app)
+                                overlay = null
+                            },
+                            MenuItem("\uf044", "Rename") { overlay = Overlay.Rename(app) },
+                            MenuItem("\uf070", "Hide") {
+                                setHidden(app, true)
+                                overlay = null
+                            },
+                            MenuItem("\uf05a", "App info") {
+                                overlay = null
+                                activity?.openAppInfo(app.packageName)
+                            },
+                        ),
+                    )
+                }
+                is Overlay.Rename -> RenamePanel(
+                    app = open.app,
+                    original = apps.firstOrNull { it.key == open.app.key }?.label ?: open.app.label,
+                    onSave = { name ->
+                        rename(open.app, name)
+                        overlay = null
+                    },
+                    onDismiss = { overlay = null },
+                )
+                Overlay.Hidden -> {
+                    val hiddenApps = apps.filter { it.key in hidden }
+                        .map { app -> names[app.key]?.let { app.copy(label = it) } ?: app }
+                        .sortedBy { it.label.lowercase() }
+                    MenuPanel(
+                        title = if (hiddenApps.isEmpty()) "no hidden apps" else "hidden apps, select to show",
+                        onDismiss = { overlay = null },
+                        items = hiddenApps.map { app ->
+                            MenuItem("\uf06e", app.label) { setHidden(app, false) }
+                        },
+                    )
+                }
+            }
         }
     }
 }
@@ -565,7 +710,7 @@ private fun AppsPage(
     gridFocus: FocusRequester,
     onQuery: (TextFieldValue) -> Unit,
     onLaunch: (AppEntry) -> Unit,
-    onPin: (AppEntry) -> Unit,
+    onMenu: (AppEntry) -> Unit,
 ) {
     val theme = LocalTheme.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -608,7 +753,7 @@ private fun AppsPage(
                     primary = searching && index == 0,
                     pinned = app.key in pinnedKeys,
                     onClick = { onLaunch(app) },
-                    onPin = { onPin(app) },
+                    onMenu = { onMenu(app) },
                     modifier = (if (index == 0) Modifier.focusRequester(gridFocus) else Modifier).fillMaxWidth(),
                 )
             }
@@ -637,7 +782,7 @@ private fun WallpaperLayer(store: ThemeStore, theme: Theme, index: Int) {
 }
 
 @Composable
-private fun Bar(backgroundLabel: String?, onTheme: () -> Unit, onNextBackground: () -> Unit) {
+private fun Bar(backgroundLabel: String?, onMenu: () -> Unit, onTheme: () -> Unit, onNextBackground: () -> Unit) {
     val theme = LocalTheme.current
     var now by remember { mutableStateOf(Date()) }
     LaunchedEffect(Unit) {
@@ -660,6 +805,7 @@ private fun Bar(backgroundLabel: String?, onTheme: () -> Unit, onNextBackground:
         val link by linkState()
 
         Row(Modifier.align(Alignment.CenterStart)) {
+            Chip("\uf303", onMenu, color = theme.accent)
             Chip(theme.title, onTheme, color = theme.accent)
             if (backgroundLabel != null) Chip(backgroundLabel, onNextBackground, color = theme.dim)
         }
@@ -754,7 +900,7 @@ private fun ClearPage(
     favourites: List<AppEntry>,
     firstFocus: FocusRequester,
     onLaunch: (AppEntry) -> Unit,
-    onUnpin: (AppEntry) -> Unit,
+    onMenu: (AppEntry) -> Unit,
     onFocus: (Boolean) -> Unit,
 ) {
     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.BottomCenter) {
@@ -773,7 +919,7 @@ private fun ClearPage(
                         pinned = false,
                         solid = true,
                         onClick = { onLaunch(app) },
-                        onPin = { onUnpin(app) },
+                        onMenu = { onMenu(app) },
                         modifier = (if (index == 0) Modifier.focusRequester(firstFocus) else Modifier)
                             .widthIn(max = 240.dp),
                     )
@@ -783,10 +929,7 @@ private fun ClearPage(
     }
 }
 
-/**
- * One app. Tap or Enter opens it; a long press, Ctrl+P or the controller's Start button
- * pins it to the clear page, or unpins it.
- */
+/** One app. Tap or Enter opens it; a long press, Menu key or the controller's Start button opens its menu. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AppCell(
@@ -794,7 +937,7 @@ private fun AppCell(
     primary: Boolean,
     pinned: Boolean,
     onClick: () -> Unit,
-    onPin: () -> Unit,
+    onMenu: () -> Unit,
     modifier: Modifier = Modifier,
     solid: Boolean = false,
 ) {
@@ -811,12 +954,12 @@ private fun AppCell(
             .background(background)
             .border(1.dp, if (focused || primary) theme.accent else theme.border)
             .onKeyEvent { event ->
-                val pin = event.type == KeyEventType.KeyDown &&
-                    (event.key == Key.ButtonStart || (event.isCtrlPressed && event.key == Key.P))
-                if (pin) onPin()
-                pin
+                val menu = event.type == KeyEventType.KeyDown &&
+                    (event.key == Key.ButtonStart || event.key == Key.Menu || (event.isCtrlPressed && event.key == Key.P))
+                if (menu) onMenu()
+                menu
             }
-            .combinedClickable(enabled = LocalInteractive.current, onClick = onClick, onLongClick = onPin)
+            .combinedClickable(enabled = LocalInteractive.current, onClick = onClick, onLongClick = onMenu)
             .padding(14.dp),
     ) {
         BasicText(
@@ -829,6 +972,104 @@ private fun AppCell(
         )
         if (pinned) {
             BasicText("\uf08d", style = mono().copy(color = if (focused) theme.bg else theme.accent))
+        }
+    }
+}
+
+data class MenuItem(val icon: String, val label: String, val hint: String? = null, val action: () -> Unit)
+
+/** A centred panel over the home screen, styled like an Omarchy menu. Focus stays inside it. */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun Panel(onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val theme = LocalTheme.current
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(theme.bg.copy(alpha = 0.6f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
+            .safeDrawingPadding()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .widthIn(max = 520.dp)
+                .heightIn(max = 640.dp)
+                .background(theme.bg)
+                .border(1.dp, theme.accent)
+                .focusProperties { exit = { FocusRequester.Cancel } }
+                .focusGroup()
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            content = content,
+        )
+    }
+}
+
+@Composable
+private fun MenuPanel(title: String, items: List<MenuItem>, onDismiss: () -> Unit) {
+    val theme = LocalTheme.current
+    val first = remember { FocusRequester() }
+    // Puts keyboard and controller focus on the first entry. A no-op in touch mode.
+    LaunchedEffect(items.size) { runCatching { first.requestFocus() } }
+    Panel(onDismiss) {
+        BasicText(title, style = mono().copy(color = theme.dim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            items.forEachIndexed { index, item ->
+                MenuRow(item, if (index == 0) Modifier.focusRequester(first) else Modifier)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MenuRow(item: MenuItem, modifier: Modifier = Modifier) {
+    val theme = LocalTheme.current
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
+            .background(if (focused) theme.accent else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable(onClick = item.action)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val color = if (focused) theme.bg else theme.fg
+        BasicText(item.icon, style = mono().copy(color = if (focused) theme.bg else theme.accent), modifier = Modifier.width(32.dp))
+        BasicText(item.label, style = mono().copy(color = color), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        item.hint?.let { BasicText(it, style = mono(13).copy(color = if (focused) theme.bg else theme.dim)) }
+    }
+}
+
+@Composable
+private fun RenamePanel(app: AppEntry, original: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    val theme = LocalTheme.current
+    val focus = remember { FocusRequester() }
+    var field by remember { mutableStateOf(TextFieldValue(app.label, TextRange(0, app.label.length))) }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Panel(onDismiss) {
+        BasicText("rename $original", style = mono().copy(color = theme.dim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        BasicTextField(
+            value = field,
+            onValueChange = { field = it },
+            singleLine = true,
+            textStyle = mono(18),
+            cursorBrush = SolidColor(theme.accent),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { onSave(field.text) }),
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(focus)
+                .border(1.dp, theme.accent)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        )
+        Row {
+            Chip("save", { onSave(field.text) }, color = theme.accent)
+            Chip("reset", { onSave("") }, color = theme.dim)
+            Chip("cancel", onDismiss, color = theme.dim)
         }
     }
 }
@@ -951,12 +1192,12 @@ private fun ThemeRow(item: Theme, current: Boolean, onClick: () -> Unit, modifie
         modifier
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
-            .background(if (focused) theme.border else androidx.compose.ui.graphics.Color.Transparent)
+            .background(if (focused) theme.accent else androidx.compose.ui.graphics.Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        BasicText(if (current) "> " else "  ", style = mono().copy(color = theme.accent))
+        BasicText(if (current) "> " else "  ", style = mono().copy(color = if (focused) theme.bg else theme.accent))
         // The theme's own background, foreground and accent, as a preview.
         Row(Modifier.border(1.dp, theme.border)) {
             for (swatch in listOf(item.bg, item.fg, item.accent)) {
@@ -966,11 +1207,11 @@ private fun ThemeRow(item: Theme, current: Boolean, onClick: () -> Unit, modifie
         Spacer(Modifier.width(12.dp))
         BasicText(
             item.title,
-            style = mono().copy(color = if (current) theme.accent else theme.fg),
+            style = mono().copy(color = if (focused) theme.bg else if (current) theme.accent else theme.fg),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        if (item.user) BasicText("added", style = mono(13).copy(color = theme.dim))
+        if (item.user) BasicText("added", style = mono(13).copy(color = if (focused) theme.bg else theme.dim))
     }
 }

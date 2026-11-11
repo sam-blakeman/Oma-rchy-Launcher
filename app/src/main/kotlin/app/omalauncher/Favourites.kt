@@ -19,3 +19,28 @@ class Recents(context: Context) {
 
     fun record(key: String) = prefs.edit().putLong(key, System.currentTimeMillis()).apply()
 }
+
+/** Per-app tweaks: apps hidden from the launcher, and names the user has given apps. */
+class AppPrefs(context: Context) {
+    private val prefs = context.getSharedPreferences("apps", Context.MODE_PRIVATE)
+
+    fun hidden(): Set<String> = prefs.getStringSet("hidden", emptySet()).orEmpty().toSet()
+
+    fun setHidden(keys: Set<String>) = prefs.edit().putStringSet("hidden", keys).apply()
+
+    fun names(): Map<String, String> = prefs.all
+        .filterKeys { it.startsWith(NAME) }
+        .mapNotNull { (key, value) -> (value as? String)?.let { key.removePrefix(NAME) to it } }
+        .toMap()
+
+    /** A blank name goes back to the app's own. */
+    fun setName(key: String, name: String) {
+        val edit = prefs.edit()
+        if (name.isBlank()) edit.remove(NAME + key) else edit.putString(NAME + key, name.trim())
+        edit.apply()
+    }
+
+    private companion object {
+        const val NAME = "name:"
+    }
+}
