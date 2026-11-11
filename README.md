@@ -11,6 +11,9 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 - **Search-first app list.** Type anywhere to filter; Enter opens the top match.
   Search also does sums (`12*7`, Enter copies the answer), jumps to settings pages
   (`wifi`, `bluetooth`, `display`...) and falls back to a web search.
+- **Ask your AI app.** Any search can be sent to Claude, ChatGPT, Gemini or Grok (whichever
+  is installed and chosen in the menu); start with `?` to ask straight away. Long-press the
+  wallpaper to open the AI app.
 - **Omarchy themes.** Uses each theme's `colors.toml` and backgrounds, and can install
   more themes from a GitHub URL, like `omarchy theme install`.
 - **Matching system wallpaper** on the home and lock screens.
@@ -30,6 +33,7 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 | Esc / B | | Clear search, then back to the clear page |
 | Long press, Ctrl+P, Start | App menu | App menu |
 | Ctrl+M / Select | Main menu | Main menu |
+| Long press wallpaper, Ctrl+I / L3 | Open AI app | Open AI app |
 | Ctrl+T / Y | Theme picker | Theme picker |
 | Ctrl+B / R3 | Next wallpaper | Next wallpaper |
 

@@ -40,6 +40,11 @@ class AppPrefs(context: Context) {
         edit.apply()
     }
 
+    /** Package of the AI app used for "Ask" and the assistant shortcut; Claude by default. */
+    var aiApp: String
+        get() = prefs.getString("ai", null) ?: "com.anthropic.claude"
+        set(value) = prefs.edit().putString("ai", value).apply()
+
     private companion object {
         const val NAME = "name:"
     }

@@ -102,7 +102,7 @@ val SETTING_SHORTCUTS = listOf(
     SettingShortcut("Keyboard", Settings.ACTION_INPUT_METHOD_SETTINGS, listOf("keyboard", "input")),
     SettingShortcut("Accessibility", Settings.ACTION_ACCESSIBILITY_SETTINGS, listOf("accessibility")),
     SettingShortcut("Security", Settings.ACTION_SECURITY_SETTINGS, listOf("security", "lock", "password", "fingerprint")),
-    SettingShortcut("Default apps", Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS, listOf("default", "launcher", "home app")),
+    SettingShortcut("Default apps", Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS, listOf("default", "launcher", "home app", "assistant")),
     SettingShortcut("Developer options", Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS, listOf("developer", "adb", "usb debugging")),
     SettingShortcut("Settings", Settings.ACTION_SETTINGS, listOf("settings")),
 )
@@ -113,3 +113,14 @@ fun settingMatches(query: String): List<SettingShortcut> {
     if (needle.length < 2) return emptyList()
     return SETTING_SHORTCUTS.filter { shortcut -> shortcut.keywords.any { it.startsWith(needle) } }
 }
+
+/** An AI app the launcher can hand questions to, and open as an assistant. */
+data class AiApp(val name: String, val packageName: String)
+
+/** Known AI apps, in the order offered. Only the installed ones are shown. */
+val AI_APPS = listOf(
+    AiApp("Claude", "com.anthropic.claude"),
+    AiApp("ChatGPT", "com.openai.chatgpt"),
+    AiApp("Gemini", "com.google.android.apps.bard"),
+    AiApp("Grok", "ai.x.grok"),
+)

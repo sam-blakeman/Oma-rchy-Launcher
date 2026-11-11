@@ -168,6 +168,7 @@ sealed interface Command {
     data object NextPage : Command
     data object Favourites : Command
     data object Menu : Command
+    data object Assistant : Command
 }
 
 /** Which panel, if any, is open over the home screen. */
@@ -176,6 +177,7 @@ private sealed interface Overlay {
     data class AppMenu(val app: AppEntry) : Overlay
     data class Rename(val app: AppEntry) : Overlay
     data object Hidden : Overlay
+    data object AiPicker : Overlay
 }
 
 class MainActivity : ComponentActivity() {
@@ -235,6 +237,8 @@ class MainActivity : ComponentActivity() {
         val command = when {
             keyCode == KeyEvent.KEYCODE_BUTTON_SELECT -> Command.Menu
             event.isCtrlPressed && keyCode == KeyEvent.KEYCODE_M -> Command.Menu
+            keyCode == KeyEvent.KEYCODE_BUTTON_THUMBL -> Command.Assistant
+            event.isCtrlPressed && keyCode == KeyEvent.KEYCODE_I -> Command.Assistant
             keyCode == KeyEvent.KEYCODE_BUTTON_X -> Command.Search
             keyCode == KeyEvent.KEYCODE_BUTTON_Y -> Command.Themes
             keyCode == KeyEvent.KEYCODE_BUTTON_L1 -> Command.PreviousPage
@@ -303,6 +307,28 @@ class MainActivity : ComponentActivity() {
             .setPrimaryClip(android.content.ClipData.newPlainText("result", text))
     }
 
+    fun isInstalled(packageName: String) = packageManager.getLaunchIntentForPackage(packageName) != null
+
+    private fun openApp(packageName: String) {
+        packageManager.getLaunchIntentForPackage(packageName)?.let { runCatching { startActivity(it) } }
+    }
+
+    /** Sends a question to an AI app, the same way sharing text to it would. */
+    fun askAi(packageName: String, question: String) {
+        val share = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT, question)
+            .setPackage(packageName)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(share) }.onFailure { openApp(packageName) }
+    }
+
+    /** Opens an AI app's assistant overlay, or the app itself if it doesn't have one. */
+    fun openAssistant(packageName: String) {
+        val assist = Intent(Intent.ACTION_ASSIST).setPackage(packageName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(assist) }.onFailure { openApp(packageName) }
+    }
+
     fun open(action: String) {
         runCatching { startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
@@ -367,6 +393,14 @@ private fun Home(homePresses: Long) {
     val appPrefs = remember { AppPrefs(context.applicationContext) }
     var hidden by remember { mutableStateOf(appPrefs.hidden()) }
     var names by remember { mutableStateOf(appPrefs.names()) }
+    var aiChoice by remember { mutableStateOf(appPrefs.aiApp) }
+    // Re-checked on every Home press, in case an AI app was installed or removed.
+    val installedAi = remember(homePresses) { AI_APPS.filter { (context as? MainActivity)?.isInstalled(it.packageName) == true } }
+    val ai = installedAi.firstOrNull { it.packageName == aiChoice } ?: installedAi.firstOrNull()
+
+    fun openAssistant() {
+        ai?.let { (context as? MainActivity)?.openAssistant(it.packageName) }
+    }
     var recents by remember { mutableStateOf(recentStore.load()) }
     val haptics = LocalHapticFeedback.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -500,6 +534,11 @@ private fun Home(homePresses: Long) {
     // Typing anywhere searches. On a controller: X search, Y themes, L1/R1 pages, R3 wallpaper.
     val latestCommand by androidx.compose.runtime.rememberUpdatedState<(Command) -> Unit> { command ->
         when (command) {
+            Command.Assistant -> {
+                overlay = null
+                pickerOpen = false
+                openAssistant()
+            }
             Command.Menu -> {
                 pickerOpen = false
                 overlay = if (overlay == Overlay.Menu) null else Overlay.Menu
@@ -531,9 +570,15 @@ private fun Home(homePresses: Long) {
     }
     LaunchedEffect(activity) { activity?.commands?.collect { latestCommand(it) } }
 
-    val shown = remember(visible, query, recents) {
-        val needle = query.trim()
-        if (needle.isEmpty()) {
+    val shown = remember(visible, query, recents, ai) {
+        // A leading "?" means "just ask the AI", so Enter sends the question.
+        val asking = query.trimStart().startsWith("?")
+        val needle = query.trim().removePrefix("?").trim()
+        val ask = ai?.takeIf { needle.isNotEmpty() }?.let { app ->
+            AppEntry(ACTION_PREFIX + "ask", "Ask ${app.name}: $needle", "\uf27a") { activity?.askAi(app.packageName, needle) }
+        }
+        if (asking) listOfNotNull(ask)
+        else if (needle.isEmpty()) {
             // The last few apps opened come first, newest first; the rest stay alphabetical.
             val recent = visible.filter { it.key in recents }.sortedByDescending { recents[it.key] }.take(RECENT_COUNT)
             recent + (visible - recent.toSet())
@@ -561,7 +606,7 @@ private fun Home(homePresses: Long) {
                 }
             }
             val web = AppEntry(ACTION_PREFIX + "web", "Search web for \"$needle\"", "\uf0ac") { activity?.webSearch(needle) }
-            listOfNotNull(answer) + matches + settings + web
+            listOfNotNull(answer) + matches + settings + listOfNotNull(ask) + web
         }
     }
 
@@ -641,6 +686,7 @@ private fun Home(homePresses: Long) {
                                 onMenu = { overlay = Overlay.AppMenu(it) },
                                 onFocus = { favouritesFocused = it },
                                 onSwipeDown = { activity?.expandNotifications() },
+                                onLongPress = ::openAssistant,
                                 onSwipeUp = { flipPage(1) },
                             )
                         }
@@ -683,6 +729,10 @@ private fun Home(homePresses: Long) {
                             overlay = null
                             latestCommand(Command.Search)
                         },
+                        MenuItem("\uf27a", "Ask ${ai?.name ?: "AI"}", "ctrl+i / L3") {
+                            overlay = null
+                            openAssistant()
+                        },
                         MenuItem("\uf1fc", "Theme", "ctrl+t / Y") {
                             overlay = null
                             pickerOpen = true
@@ -696,6 +746,7 @@ private fun Home(homePresses: Long) {
                             overlay = null
                             activity?.open(Settings.ACTION_WIFI_SETTINGS)
                         },
+                        MenuItem("\uf0e7", "AI app", ai?.name ?: "none installed") { overlay = Overlay.AiPicker },
                         MenuItem("\uf070", "Hidden apps", if (hidden.isEmpty()) null else "${hidden.size}") {
                             overlay = Overlay.Hidden
                         },
@@ -742,6 +793,17 @@ private fun Home(homePresses: Long) {
                         overlay = null
                     },
                     onDismiss = { overlay = null },
+                )
+                Overlay.AiPicker -> MenuPanel(
+                    title = if (installedAi.isEmpty()) "no AI apps installed" else "ask with",
+                    onDismiss = { overlay = null },
+                    items = installedAi.map { app ->
+                        MenuItem(if (app == ai) "\uf00c" else " ", app.name) {
+                            aiChoice = app.packageName
+                            appPrefs.aiApp = app.packageName
+                            overlay = null
+                        }
+                    },
                 )
                 Overlay.Hidden -> {
                     val hiddenApps = apps.filter { it.key in hidden }
@@ -965,6 +1027,7 @@ private fun ClearPage(
     onFocus: (Boolean) -> Unit,
     onSwipeDown: () -> Unit,
     onSwipeUp: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     val threshold = with(LocalDensity.current) { 80.dp.toPx() }
     val enabled = LocalInteractive.current
@@ -988,6 +1051,10 @@ private fun ClearPage(
                         }
                     },
                 )
+            }
+            // Long press on the wallpaper opens the AI assistant.
+            .pointerInput(enabled) {
+                if (enabled) detectTapGestures(onLongPress = { onLongPress() })
             }
             .padding(24.dp),
         contentAlignment = Alignment.BottomCenter,
