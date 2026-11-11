@@ -140,6 +140,9 @@ private val LocalBarFocusable = staticCompositionLocalOf { true }
 // a focus search that runs off a page walks every page after it looking for a target.
 private const val PAGE_COUNT = 200
 
+/** How many recently opened apps lead the app list. */
+private const val RECENT_COUNT = 8
+
 data class AppEntry(val key: String, val label: String, val launch: () -> Unit)
 
 sealed interface Command {
@@ -310,6 +313,8 @@ private fun Home(homePresses: Long) {
     val favouriteStore = remember { Favourites(context.applicationContext) }
     var favourites by remember { mutableStateOf(favouriteStore.load()) }
     var favouritesFocused by remember { mutableStateOf(false) }
+    val recentStore = remember { Recents(context.applicationContext) }
+    var recents by remember { mutableStateOf(recentStore.load()) }
     val haptics = LocalHapticFeedback.current
     val keyboard = LocalSoftwareKeyboardController.current
     val activity = context as? MainActivity
@@ -426,9 +431,13 @@ private fun Home(homePresses: Long) {
     }
     LaunchedEffect(activity) { activity?.commands?.collect { latestCommand(it) } }
 
-    val shown = remember(apps, query) {
+    val shown = remember(apps, query, recents) {
         val needle = query.trim()
-        if (needle.isEmpty()) apps
+        if (needle.isEmpty()) {
+            // The last few apps opened come first, newest first; the rest stay alphabetical.
+            val recent = apps.filter { it.key in recents }.sortedByDescending { recents[it.key] }.take(RECENT_COUNT)
+            recent + (apps - recent.toSet())
+        }
         else apps.mapNotNull { app ->
             // Names starting with the query first, then word starts, then anywhere.
             val rank = when {
@@ -489,6 +498,8 @@ private fun Home(homePresses: Long) {
                     ) {
                         val launch: (AppEntry) -> Unit = { app ->
                             app.launch()
+                            recentStore.record(app.key)
+                            recents = recentStore.load()
                             dismissKeyboard()
                             setQuery("")
                         }
