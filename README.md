@@ -9,6 +9,8 @@ Lenovo Legion Y700 Gen 3, but it runs on any Android 13+ device.
 - **Clear home page** with just the wallpaper, a Waybar-style bar and a row of pinned apps.
   Swipe either way for the app list.
 - **Search-first app list.** Type anywhere to filter; Enter opens the top match.
+  Search also does sums (`12*7`, Enter copies the answer), jumps to settings pages
+  (`wifi`, `bluetooth`, `display`...) and falls back to a web search.
 - **Omarchy themes.** Uses each theme's `colors.toml` and backgrounds, and can install
   more themes from a GitHub URL, like `omarchy theme install`.
 - **Matching system wallpaper** on the home and lock screens.

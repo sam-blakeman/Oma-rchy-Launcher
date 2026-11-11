@@ -146,9 +146,16 @@ private const val PAGE_COUNT = 200
 /** How many recently opened apps lead the app list. */
 private const val RECENT_COUNT = 8
 
-data class AppEntry(val key: String, val label: String, val launch: () -> Unit) {
+/**
+ * One entry in the app list. Usually an app; search also adds actions (a calculator answer,
+ * a settings page, a web search), which carry an icon and have no app menu.
+ */
+data class AppEntry(val key: String, val label: String, val icon: String? = null, val launch: () -> Unit) {
     val packageName: String get() = key.substringBefore('/')
+    val isAction: Boolean get() = key.startsWith(ACTION_PREFIX)
 }
+
+private const val ACTION_PREFIX = "action:"
 
 sealed interface Command {
     data class Type(val char: Char) : Command
@@ -279,6 +286,20 @@ class MainActivity : ComponentActivity() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
         }
+    }
+
+    /**
+     * Searches the web in the default browser. A web-search intent would show a chooser on
+     * devices where several apps claim it, so this opens the search page directly.
+     */
+    fun webSearch(query: String) {
+        val url = android.net.Uri.parse("https://www.google.com/search?q=" + android.net.Uri.encode(query))
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    }
+
+    fun copyToClipboard(text: String) {
+        getSystemService(android.content.ClipboardManager::class.java)
+            .setPrimaryClip(android.content.ClipData.newPlainText("result", text))
     }
 
     fun open(action: String) {
@@ -494,16 +515,31 @@ private fun Home(homePresses: Long) {
             val recent = visible.filter { it.key in recents }.sortedByDescending { recents[it.key] }.take(RECENT_COUNT)
             recent + (visible - recent.toSet())
         }
-        else visible.mapNotNull { app ->
-            // Names starting with the query first, then word starts, then anywhere.
-            val rank = when {
-                app.label.startsWith(needle, ignoreCase = true) -> 0
-                app.label.split(' ', '-').any { it.startsWith(needle, ignoreCase = true) } -> 1
-                app.label.contains(needle, ignoreCase = true) -> 2
-                else -> return@mapNotNull null
+        else {
+            val matches = visible.mapNotNull { app ->
+                // Names starting with the query first, then word starts, then anywhere.
+                val rank = when {
+                    app.label.startsWith(needle, ignoreCase = true) -> 0
+                    app.label.split(' ', '-').any { it.startsWith(needle, ignoreCase = true) } -> 1
+                    app.label.contains(needle, ignoreCase = true) -> 2
+                    else -> return@mapNotNull null
+                }
+                rank to app
+            }.sortedBy { it.first }.map { it.second }
+
+            // A sum comes first, so Enter copies its answer. Settings pages follow the apps,
+            // and a web search is always last, so Enter falls through to it when nothing matches.
+            val answer = Calculator.evaluate(needle)?.let { Calculator.format(it) }?.let { result ->
+                AppEntry(ACTION_PREFIX + "calc", "= $result", "\uf1ec") { activity?.copyToClipboard(result) }
             }
-            rank to app
-        }.sortedBy { it.first }.map { it.second }
+            val settings = settingMatches(needle).map { shortcut ->
+                AppEntry(ACTION_PREFIX + "setting:" + shortcut.action, shortcut.label + " settings", "\uf013") {
+                    activity?.open(shortcut.action)
+                }
+            }
+            val web = AppEntry(ACTION_PREFIX + "web", "Search web for \"$needle\"", "\uf0ac") { activity?.webSearch(needle) }
+            listOfNotNull(answer) + matches + settings + web
+        }
     }
 
     CompositionLocalProvider(LocalTheme provides theme) {
@@ -555,8 +591,10 @@ private fun Home(homePresses: Long) {
                     ) {
                         val launch: (AppEntry) -> Unit = { app ->
                             app.launch()
-                            recentStore.record(app.key)
-                            recents = recentStore.load()
+                            if (!app.isAction) {
+                                recentStore.record(app.key)
+                                recents = recentStore.load()
+                            }
                             dismissKeyboard()
                             setQuery("")
                         }
@@ -753,7 +791,7 @@ private fun AppsPage(
                     primary = searching && index == 0,
                     pinned = app.key in pinnedKeys,
                     onClick = { onLaunch(app) },
-                    onMenu = { onMenu(app) },
+                    onMenu = { if (!app.isAction) onMenu(app) },
                     modifier = (if (index == 0) Modifier.focusRequester(gridFocus) else Modifier).fillMaxWidth(),
                 )
             }
@@ -962,6 +1000,9 @@ private fun AppCell(
             .combinedClickable(enabled = LocalInteractive.current, onClick = onClick, onLongClick = onMenu)
             .padding(14.dp),
     ) {
+        app.icon?.let {
+            BasicText("$it  ", style = mono().copy(color = if (focused) theme.bg else theme.accent))
+        }
         BasicText(
             app.label,
             style = mono().copy(color = if (focused) theme.bg else if (primary) theme.accent else theme.fg),
