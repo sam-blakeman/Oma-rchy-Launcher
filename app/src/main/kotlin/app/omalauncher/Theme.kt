@@ -1,11 +1,13 @@
 package app.omalauncher
 
+import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -132,6 +134,26 @@ class ThemeStore(private val context: Context) {
             while (bounds.outWidth / (sample * 2) >= width && bounds.outHeight / (sample * 2) >= height) sample *= 2
             open().use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
         }.getOrNull()
+    }
+
+    /**
+     * Sets Android's home and lock screen wallpaper to a theme's background, or to the
+     * theme's plain background colour when it has no images. Returns whether it worked.
+     */
+    suspend fun setSystemWallpaper(theme: Theme, index: Int): Boolean = withContext(Dispatchers.IO) {
+        val manager = WallpaperManager.getInstance(context)
+        val both = WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+        runCatching {
+            when (val wallpaper = theme.backgrounds.getOrNull(index.mod(theme.backgrounds.size.coerceAtLeast(1)))) {
+                is Wallpaper.Asset -> context.assets.open(wallpaper.path).use { manager.setStream(it, null, true, both) }
+                is Wallpaper.OnDisk -> wallpaper.file.inputStream().use { manager.setStream(it, null, true, both) }
+                null -> {
+                    val plain = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+                    plain.eraseColor(theme.bg.toArgb())
+                    manager.setBitmap(plain, null, true, both)
+                }
+            }
+        }.isSuccess
     }
 
     /**

@@ -16,6 +16,19 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.runtime.key
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.input.pointer.pointerInput
@@ -56,7 +69,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicText
@@ -120,7 +133,14 @@ private fun mono(size: Int = 16) =
 /** False for everything behind an open overlay, so focus can't wander underneath it. */
 private val LocalInteractive = staticCompositionLocalOf { true }
 
-data class AppEntry(val label: String, val launch: () -> Unit)
+/** False on the clear page, where keys only flip pages, so the bar never shows a focus highlight. */
+private val LocalBarFocusable = staticCompositionLocalOf { true }
+
+// Enough pages that swiping never reaches an end in practice. Kept small on purpose:
+// a focus search that runs off a page walks every page after it looking for a target.
+private const val PAGE_COUNT = 200
+
+data class AppEntry(val key: String, val label: String, val launch: () -> Unit)
 
 sealed interface Command {
     data class Type(val char: Char) : Command
@@ -128,6 +148,9 @@ sealed interface Command {
     data object Search : Command
     data object Themes : Command
     data object NextBackground : Command
+    data object PreviousPage : Command
+    data object NextPage : Command
+    data object Favourites : Command
 }
 
 class MainActivity : ComponentActivity() {
@@ -148,13 +171,51 @@ class MainActivity : ComponentActivity() {
     /** Keyboard and controller input that no focused element claimed, for the UI to act on. */
     val commands = MutableSharedFlow<Command>(extraBufferCapacity = 32)
 
+    /**
+     * Set by the UI while the clear wallpaper page is showing. There, Left and Right flip
+     * pages and Enter or A opens the app list, whatever happens to hold focus.
+     */
+    var arrowsFlipPages = false
+
+    /** Set by the UI while the clear page is showing, whether or not a favourite has focus. */
+    var clearPage = false
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val left = event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+        val down = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+        val flips = left || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT || event.keyCode in OPEN_KEYS
+        if (arrowsFlipPages && (flips || down)) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                commands.tryEmit(
+                    when {
+                        down -> Command.Favourites // Down steps onto the pinned apps.
+                        left -> Command.PreviousPage
+                        else -> Command.NextPage
+                    },
+                )
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // Esc and controller B don't reliably arrive as Back, so do it here.
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE || keyCode == KeyEvent.KEYCODE_BUTTON_B) {
+            onBackPressedDispatcher.onBackPressed()
+            return true
+        }
         val modified = event.isCtrlPressed || event.isAltPressed || event.isMetaPressed
         val char = event.unicodeChar
         val command = when {
             keyCode == KeyEvent.KEYCODE_BUTTON_X -> Command.Search
             keyCode == KeyEvent.KEYCODE_BUTTON_Y -> Command.Themes
-            keyCode == KeyEvent.KEYCODE_BUTTON_R1 -> Command.NextBackground
+            keyCode == KeyEvent.KEYCODE_BUTTON_L1 -> Command.PreviousPage
+            keyCode == KeyEvent.KEYCODE_BUTTON_R1 -> Command.NextPage
+            keyCode == KeyEvent.KEYCODE_BUTTON_THUMBR -> Command.NextBackground
+            // Moving past either end of the favourites row flips the page.
+            clearPage && keyCode == KeyEvent.KEYCODE_DPAD_LEFT -> Command.PreviousPage
+            clearPage && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT -> Command.NextPage
             event.isCtrlPressed && keyCode == KeyEvent.KEYCODE_T -> Command.Themes
             event.isCtrlPressed && keyCode == KeyEvent.KEYCODE_B -> Command.NextBackground
             modified -> null
@@ -188,6 +249,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private companion object {
+        val OPEN_KEYS = setOf(KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_BUTTON_A)
+    }
+
     fun open(action: String) {
         runCatching { startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
@@ -214,13 +279,14 @@ private suspend fun loadApps(context: Context): List<AppEntry> = withContext(Dis
     launcherApps.getActivityList(null, user)
         .filter { it.applicationInfo.packageName != context.packageName }
         .map { info ->
-            AppEntry(info.label.toString()) {
+            AppEntry(info.componentName.flattenToShortString(), info.label.toString()) {
                 launcherApps.startMainActivity(info.componentName, user, null, null)
             }
         }
         .sortedBy { it.label.lowercase() }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun Home(homePresses: Long) {
     val context = LocalContext.current
@@ -239,10 +305,20 @@ private fun Home(homePresses: Long) {
     val query = field.text
     var pickerOpen by remember { mutableStateOf(false) }
     val searchFocus = remember { FocusRequester() }
+    val gridFocus = remember { FocusRequester() }
+    val favouriteFocus = remember { FocusRequester() }
+    val favouriteStore = remember { Favourites(context.applicationContext) }
+    var favourites by remember { mutableStateOf(favouriteStore.load()) }
+    var favouritesFocused by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
     val keyboard = LocalSoftwareKeyboardController.current
     val activity = context as? MainActivity
     val focusManager = LocalFocusManager.current
-    val gridState = rememberLazyGridState()
+    val scope = rememberCoroutineScope()
+    // An endless strip of pages alternating clear wallpaper (even) and app list (odd),
+    // so a swipe in either direction from one always reaches the other.
+    val pager = rememberPagerState(initialPage = PAGE_COUNT / 2) { PAGE_COUNT }
+    val onApps = pager.currentPage % 2 != 0
 
     fun dismissKeyboard() {
         focusManager.clearFocus()
@@ -253,11 +329,24 @@ private fun Home(homePresses: Long) {
         field = TextFieldValue(text, TextRange(text.length))
     }
 
+    // Android's own wallpaper follows the launcher's, so the lock screen and recents match.
+    fun syncSystemWallpaper(target: Theme, index: Int) {
+        scope.launch { store.setSystemWallpaper(target, index) }
+    }
+
     fun nextBackground() {
         if (theme.backgrounds.isEmpty()) return
         backgroundIndex = (backgroundIndex + 1).mod(theme.backgrounds.size)
         store.setBackgroundIndex(theme, backgroundIndex)
+        syncSystemWallpaper(theme, backgroundIndex)
     }
+
+    fun togglePin(app: AppEntry) {
+        favourites = if (app.key in favourites) favourites - app.key else favourites + app.key
+        favouriteStore.save(favourites)
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+    val pinned = remember(apps, favourites) { favourites.mapNotNull { key -> apps.firstOrNull { it.key == key } } }
 
     LaunchedEffect(Unit) { themes = store.loadAll() }
     LaunchedEffect(homePresses) {
@@ -265,32 +354,73 @@ private fun Home(homePresses: Long) {
         setQuery("")
         pickerOpen = false
         apps = loadApps(context)
+        // Home always lands on the clear wallpaper page.
+        if (pager.currentPage % 2 != 0) {
+            val clear = pager.currentPage - 1
+            // A focus change can interrupt the slide; if so, finish the move without it.
+            runCatching { pager.animateScrollToPage(clear) }
+            if (pager.currentPage != clear) pager.scrollToPage(clear)
+        }
+    }
+    // Clear pages are identical, so quietly jump back to the middle of the strip
+    // whenever it has drifted far to one side.
+    LaunchedEffect(pager.settledPage) {
+        val page = pager.settledPage
+        if (page % 2 == 0 && kotlin.math.abs(page - PAGE_COUNT / 2) > PAGE_COUNT / 4) pager.scrollToPage(PAGE_COUNT / 2)
+    }
+    // Leaving the app list, by swipe or otherwise, resets it.
+    LaunchedEffect(onApps) {
+        if (!onApps) {
+            dismissKeyboard()
+            setQuery("")
+        }
+    }
+    SideEffect {
+        activity?.clearPage = !onApps && !pickerOpen
+        activity?.arrowsFlipPages = !onApps && !pickerOpen && !favouritesFocused
+    }
+
+    fun flipPage(delta: Int) {
+        dismissKeyboard()
+        scope.launch {
+            pager.animateScrollToPage(pager.currentPage + delta)
+            // Arriving at the app list by key or controller, start on the first app.
+            // In touch mode this request is ignored.
+            if (pager.currentPage % 2 != 0) runCatching { gridFocus.requestFocus() }
+        }
     }
     LaunchedEffect(theme.light) { activity?.styleSystemBars(theme.light) }
     BackHandler {
         if (pickerOpen) pickerOpen = false
         else {
             dismissKeyboard()
-            setQuery("")
+            // Back first clears a search, then returns to the clear page.
+            if (field.text.isNotEmpty()) setQuery("") else if (onApps) flipPage(-1)
         }
     }
-    // Scrolling the app grid puts the on-screen keyboard away.
-    LaunchedEffect(gridState.isScrollInProgress) { if (gridState.isScrollInProgress) keyboard?.hide() }
 
-    // Typing anywhere searches; X, Y and R1 on a controller map to search, themes, wallpaper.
+    // Typing anywhere searches. On a controller: X search, Y themes, L1/R1 pages, R3 wallpaper.
     val latestCommand by androidx.compose.runtime.rememberUpdatedState<(Command) -> Unit> { command ->
         when (command) {
             Command.Themes -> pickerOpen = !pickerOpen
             Command.NextBackground -> nextBackground()
+            Command.Favourites -> runCatching { favouriteFocus.requestFocus() }
+            Command.PreviousPage -> if (!pickerOpen) flipPage(-1)
+            Command.NextPage -> if (!pickerOpen) flipPage(1)
             else -> if (!pickerOpen) {
                 when (command) {
                     // Read the live text, not this composition's copy: fast typing can
                     // deliver several keys before the screen redraws.
                     is Command.Type -> if (command.char != ' ' || field.text.isNotEmpty()) setQuery(field.text + command.char)
                     Command.Backspace -> setQuery(field.text.dropLast(1))
-                    else -> keyboard?.show()
+                    else -> Unit
                 }
-                runCatching { searchFocus.requestFocus() }
+                // From the clear page, slide the app list in before focusing its search box.
+                scope.launch {
+                    if (pager.currentPage % 2 == 0) pager.animateScrollToPage(pager.currentPage + 1)
+                    runCatching { searchFocus.requestFocus() }
+                    if (command == Command.Search) keyboard?.show()
+                }
             }
         }
     }
@@ -323,45 +453,67 @@ private fun Home(homePresses: Long) {
 
             CompositionLocalProvider(LocalInteractive provides !pickerOpen) {
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-                Bar(
-                    backgroundLabel = if (theme.backgrounds.isEmpty()) null
-                    else "bg ${backgroundIndex.mod(theme.backgrounds.size) + 1}/${theme.backgrounds.size}",
-                    onTheme = { pickerOpen = true },
-                    onNextBackground = ::nextBackground,
-                )
-                // The app panel sits inside gaps, like a tiled window over the wallpaper.
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(12.dp)
-                        .background(theme.bg.copy(alpha = 0.88f))
-                        .border(1.dp, theme.accent)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    val launch: (AppEntry) -> Unit = { app ->
-                        app.launch()
-                        dismissKeyboard()
-                        setQuery("")
-                    }
-                    SearchBox(
-                        field = field,
-                        placeholder = "search ${apps.size} apps",
-                        focus = searchFocus,
-                        onChange = { field = it },
-                        onGo = { shown.firstOrNull()?.let(launch) },
+                CompositionLocalProvider(LocalBarFocusable provides onApps) {
+                    Bar(
+                        backgroundLabel = if (theme.backgrounds.isEmpty()) null
+                        else "bg ${backgroundIndex.mod(theme.backgrounds.size) + 1}/${theme.backgrounds.size}",
+                        onTheme = { pickerOpen = true },
+                        onNextBackground = ::nextBackground,
                     )
-                    LazyVerticalGrid(
-                        state = gridState,
-                        columns = GridCells.Adaptive(minSize = 220.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxSize(),
+                }
+                HorizontalPager(
+                    state = pager,
+                    userScrollEnabled = !pickerOpen,
+                    modifier = Modifier.fillMaxSize(),
+                ) { page ->
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            // Arrow and Tab focus must not leave a page sideways: the search
+                            // would run through every other page. Page flips handle that instead.
+                            .focusProperties {
+                                exit = { direction ->
+                                    if (direction == FocusDirection.Up || direction == FocusDirection.Down) {
+                                        FocusRequester.Default
+                                    } else {
+                                        FocusRequester.Cancel
+                                    }
+                                }
+                            }
+                            .focusGroup(),
                     ) {
-                        items(shown) { app ->
-                            // While searching, the first match is what Enter will open.
-                            AppCell(app, primary = query.isNotBlank() && app === shown.first(), onClick = { launch(app) })
+                    // Only the page in view takes input. Otherwise focus can land on an app
+                    // in the page sliding away, and the pager scrolls back to show it.
+                    CompositionLocalProvider(
+                        LocalInteractive provides (!pickerOpen && page == pager.currentPage),
+                    ) {
+                        val launch: (AppEntry) -> Unit = { app ->
+                            app.launch()
+                            dismissKeyboard()
+                            setQuery("")
                         }
+                        if (page % 2 != 0) {
+                            AppsPage(
+                                apps = shown,
+                                total = apps.size,
+                                pinnedKeys = favourites,
+                                field = field,
+                                searchFocus = searchFocus,
+                                gridFocus = gridFocus,
+                                onQuery = { field = it },
+                                onLaunch = launch,
+                                onPin = ::togglePin,
+                            )
+                        } else {
+                            ClearPage(
+                                favourites = pinned,
+                                firstFocus = favouriteFocus,
+                                onLaunch = launch,
+                                onUnpin = ::togglePin,
+                                onFocus = { favouritesFocused = it },
+                            )
+                        }
+                    }
                     }
                 }
             }
@@ -376,13 +528,77 @@ private fun Home(homePresses: Long) {
                         themeId = it.id
                         store.currentId = it.id
                         pickerOpen = false
+                        syncSystemWallpaper(it, store.backgroundIndex(it))
                     },
                     onInstalled = { id ->
                         themes = store.loadAll()
                         themeId = id
                         store.currentId = id
+                        themes.firstOrNull { it.id == id }?.let { syncSystemWallpaper(it, store.backgroundIndex(it)) }
                     },
                     onDismiss = { pickerOpen = false },
+                )
+            }
+        }
+    }
+}
+
+/** The app list: a search box over a grid, in a panel set inside gaps like a tiled window. */
+@Composable
+private fun AppsPage(
+    apps: List<AppEntry>,
+    total: Int,
+    pinnedKeys: List<String>,
+    field: TextFieldValue,
+    searchFocus: FocusRequester,
+    gridFocus: FocusRequester,
+    onQuery: (TextFieldValue) -> Unit,
+    onLaunch: (AppEntry) -> Unit,
+    onPin: (AppEntry) -> Unit,
+) {
+    val theme = LocalTheme.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val gridState = rememberLazyGridState()
+    val searching = field.text.isNotBlank()
+
+    // Dragging the grid puts the on-screen keyboard away; a new search starts from the top.
+    LaunchedEffect(gridState) {
+        gridState.interactionSource.interactions.collect { if (it is DragInteraction.Start) keyboard?.hide() }
+    }
+    LaunchedEffect(field.text) { gridState.scrollToItem(0) }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(12.dp)
+            .background(theme.bg.copy(alpha = 0.88f))
+            .border(1.dp, theme.accent)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        SearchBox(
+            field = field,
+            placeholder = "search $total apps",
+            focus = searchFocus,
+            onChange = onQuery,
+            onGo = { apps.firstOrNull()?.let(onLaunch) },
+        )
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Adaptive(minSize = 220.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            itemsIndexed(apps) { index, app ->
+                // While searching, the first match is what Enter will open.
+                AppCell(
+                    app,
+                    primary = searching && index == 0,
+                    pinned = app.key in pinnedKeys,
+                    onClick = { onLaunch(app) },
+                    onPin = { onPin(app) },
+                    modifier = (if (index == 0) Modifier.focusRequester(gridFocus) else Modifier).fillMaxWidth(),
                 )
             }
         }
@@ -459,11 +675,13 @@ private fun Chip(
     color: androidx.compose.ui.graphics.Color = LocalTheme.current.fg,
 ) {
     val theme = LocalTheme.current
+    val focusable = LocalBarFocusable.current
     var focused by remember { mutableStateOf(false) }
     BasicText(
         text,
         style = mono().copy(color = if (focused) theme.bg else color),
         modifier = modifier
+            .focusProperties { canFocus = focusable }
             .onFocusChanged { focused = it.isFocused }
             .background(if (focused) theme.accent else androidx.compose.ui.graphics.Color.Transparent)
             .clickable(enabled = LocalInteractive.current, onClick = onClick)
@@ -519,23 +737,89 @@ private fun SearchBox(
     }
 }
 
+/** The clear page: nothing but the wallpaper, with any pinned apps in a row along the bottom. */
 @Composable
-private fun AppCell(app: AppEntry, primary: Boolean, onClick: () -> Unit) {
+private fun ClearPage(
+    favourites: List<AppEntry>,
+    firstFocus: FocusRequester,
+    onLaunch: (AppEntry) -> Unit,
+    onUnpin: (AppEntry) -> Unit,
+    onFocus: (Boolean) -> Unit,
+) {
+    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.BottomCenter) {
+        Row(
+            Modifier
+                .onFocusChanged { onFocus(it.hasFocus) }
+                .focusGroup()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            favourites.forEachIndexed { index, app ->
+                key(app.key) {
+                    AppCell(
+                        app,
+                        primary = false,
+                        pinned = false,
+                        solid = true,
+                        onClick = { onLaunch(app) },
+                        onPin = { onUnpin(app) },
+                        modifier = (if (index == 0) Modifier.focusRequester(firstFocus) else Modifier)
+                            .widthIn(max = 240.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One app. Tap or Enter opens it; a long press, Ctrl+P or the controller's Start button
+ * pins it to the clear page, or unpins it.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AppCell(
+    app: AppEntry,
+    primary: Boolean,
+    pinned: Boolean,
+    onClick: () -> Unit,
+    onPin: () -> Unit,
+    modifier: Modifier = Modifier,
+    solid: Boolean = false,
+) {
     val theme = LocalTheme.current
     var focused by remember { mutableStateOf(false) }
-    BasicText(
-        app.label,
-        style = mono().copy(color = if (focused) theme.bg else if (primary) theme.accent else theme.fg),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .fillMaxWidth()
+    val background = when {
+        focused -> theme.accent
+        solid -> theme.bg.copy(alpha = 0.88f)
+        else -> androidx.compose.ui.graphics.Color.Transparent
+    }
+    Row(
+        modifier
             .onFocusChanged { focused = it.isFocused }
-            .background(if (focused) theme.accent else androidx.compose.ui.graphics.Color.Transparent)
+            .background(background)
             .border(1.dp, if (focused || primary) theme.accent else theme.border)
-            .clickable(enabled = LocalInteractive.current, onClick = onClick)
+            .onKeyEvent { event ->
+                val pin = event.type == KeyEventType.KeyDown &&
+                    (event.key == Key.ButtonStart || (event.isCtrlPressed && event.key == Key.P))
+                if (pin) onPin()
+                pin
+            }
+            .combinedClickable(enabled = LocalInteractive.current, onClick = onClick, onLongClick = onPin)
             .padding(14.dp),
-    )
+    ) {
+        BasicText(
+            app.label,
+            style = mono().copy(color = if (focused) theme.bg else if (primary) theme.accent else theme.fg),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            // Grid cells stretch so the pin sits at the right edge; favourites hug their label.
+            modifier = Modifier.weight(1f, fill = !solid),
+        )
+        if (pinned) {
+            BasicText("\uf08d", style = mono().copy(color = if (focused) theme.bg else theme.accent))
+        }
+    }
 }
 
 @OptIn(ExperimentalComposeUiApi::class)
